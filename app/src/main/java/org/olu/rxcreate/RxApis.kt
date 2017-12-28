@@ -1,7 +1,9 @@
 package org.olu.rxcreate
 
+import android.hardware.SensorManager
 import android.location.Location
-import io.reactivex.Observable
+import android.util.Log
+import io.reactivex.Flowable
 import io.reactivex.android.schedulers.AndroidSchedulers
 import io.reactivex.functions.BiFunction
 import io.reactivex.schedulers.Schedulers
@@ -15,41 +17,60 @@ data class UserData(val location: Location,
 
 interface RxAndroidApis {
 
-    fun getLocationStream(): Observable<Location>
+    fun getLocationStream(): Flowable<Location>
 
-    fun getAzimuthStream(): Observable<Double>
+    fun getDeviceMagneticField(): Flowable<FloatArray>
+
+    fun getDeviceAcceleration(): Flowable<FloatArray>
 }
 
-interface RxRestApi {
+interface RxRetrofitApi {
 
     @POST("/submitUser")
-    fun postUserData(@Body userData: UserData): Observable<ResponseBody>
+    fun postUserData(@Body userData: UserData): Flowable<ResponseBody>
 }
 
 
 class UserService(
-        val locationStream: Observable<Location>,
-        val azimuthStream: Observable<Double>,
-        val restApi: RxRestApi) {
-
-    private val combineDataFunction = BiFunction<Location, Double, UserData> { location, azimuth ->
-        UserData(location, azimuth)
-    }
+        val locationStream: Flowable<Location>,
+        val accelerometerStream: Flowable<FloatArray>,
+        val magneticFieldStream: Flowable<FloatArray>,
+        val restApi: RxRetrofitApi) {
 
     fun startTrackingUserData() {
-        Observable.combineLatest(
+
+        val azimuthStream = Flowable.combineLatest(
+                accelerometerStream,
+                magneticFieldStream,
+                computeAzimuth())
+
+        Flowable.combineLatest(
                 locationStream.filter { it.accuracy < 20 },
                 azimuthStream,
-                combineDataFunction)
+                combineLocationAndAzimuth())
                 .throttleLast(5, TimeUnit.SECONDS)
                 .flatMap { userData -> restApi.postUserData(userData) }
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe({ response ->
-                    //Data successfully sent
-                }, { error ->
-                    //Handle error
+                .subscribe({
+                    //API response received
                 })
 
+    }
+
+    private fun combineLocationAndAzimuth() = BiFunction<Location, Double, UserData> { location, azimuth ->
+        UserData(location, azimuth)
+    }
+
+    private fun computeAzimuth() = BiFunction<FloatArray, FloatArray, Double> { acceleration, magnetic ->
+        val rotationMatrix = FloatArray(9)
+        val inclinationMatrix = FloatArray(9)
+        val success = SensorManager.getRotationMatrix(rotationMatrix, inclinationMatrix, acceleration, magnetic)
+        if (success) {
+            val orientation = FloatArray(3)
+            SensorManager.getOrientation(rotationMatrix, orientation)
+            return@BiFunction Math.toDegrees(orientation.first().toDouble())
+        }
+        return@BiFunction Double.MIN_VALUE
     }
 }
